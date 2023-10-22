@@ -7,7 +7,8 @@ import os
 import aiohttp as aiohttp
 
 
-async def post_data(translate: dict):
+async def post_data(translate: dict, session):
+    global translate_total, ex
     start_time = time.time()
     translate_one = translate.copy()
     translate_two = {}
@@ -24,42 +25,43 @@ async def post_data(translate: dict):
     }
     msg.update(DATA)
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60),
-                                         connector=aiohttp.TCPConnector(limit=64, ssl=False, )) as session:
-            async with await session.post(
-                    url=URL,
-                    headers=heards,
-                    data=json.dumps(msg)) as resp:
-                _ = json.loads(await resp.text())
-                translate_done = _['choices'][0]['message']['content']
-                if isinstance(translate_done, str):
-                    translate_done = json.loads(translate_done.replace("'", '"'))
-                for kiu, vsd in translate_one.items():
-                    if vsd in translate_done:
-                        translate_one[kiu] = translate_done[vsd]
-                    else:
-                        ex[kiu] = translate_two[vsd]
-                translate_total.update(translate_one)
-                print(f'成功完成:{len(translate_one)}个,时间{time.time() - start_time}',len(ex))
-    except Exception:
+        async with await session.post(
+                url=URL,
+                headers=heards,
+                data=json.dumps(msg)) as resp:
+            _ = json.loads(await resp.text())
+            translate_done = _['choices'][0]['message']['content']
+            if isinstance(translate_done, str):
+                translate_done = json.loads(translate_done.replace("'", '"'))
+            for kiu, vsd in translate_one.items():
+                if vsd in translate_done:
+                    translate_one[kiu] = translate_done[vsd]
+                else:
+                    ex[kiu] = translate_two[vsd]
+            translate_total.update(translate_one)  # 保存翻译结果
+            print(f'成功完成:{len(translate_one)}个,时间{time.time() - start_time}', len(ex))
+    except Exception as e:
+        print(f'错误:{e}')
         ex.update(translate)
 
 
-def run(translate_text, save, epn):
+async def run(translate_text, save, epn):
     task = []
     _translate = {}
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60),
+                                     connector=aiohttp.TCPConnector(limit=0, ssl=False, )) as session:
 
-    for k, v in translate_text.items():
-        _translate[k] = v
-        if len(str(_translate)) > text_max:
-            _ = loop.create_task(post_data(_translate))
-            task.append(_)
-            _translate = {}
-        if len(task) >= post_max:
-            loop.run_until_complete(asyncio.wait(task))
-            task = []
+        for k, v in translate_text.items():
+            _translate[k] = v
+            if len(str(_translate)) > text_max:
+                task.append(post_data(_translate, session))
+                _translate = {}
+            if len(task) >= post_max:
+                await asyncio.gather(*task)
+                task = []
+                time.sleep(post_time)
     if task:
-        loop.run_until_complete(asyncio.wait(task))
+        await asyncio.gather(*task)
     with open(save, 'w+', encoding='utf-8') as f:
         json.dump(translate_total, f, ensure_ascii=False)
     with open(epn, 'w+', encoding='utf-8') as f:
@@ -79,13 +81,13 @@ def find_largest_numbered(folder_path):
         return max(max_num)
 
     else:
-        return 0  # 文件夹为空，返回1
+        return 0  # 文件夹为空，返回0
 
 
 # 按间距中的绿色按钮以运行脚本。
 if __name__ == '__main__':
     #####################################################################
-    # 首次翻译->继续翻译错误文件->调整text_max参数->继续翻译错误文件->调整text_max参数->继续翻译错误文件....-> 合并文件
+    # 首次翻译->保存错误文件与翻译正确文件->调整text_max参数->继续翻译错误文件->保存错误文件与翻译正确文件->调整text_max参数->继续翻译错误文件....-> 合并正确文件
     #####################################################################
 
     # 以下为需要修改参数
@@ -100,6 +102,8 @@ if __name__ == '__main__':
         "temperature": 0.7,
 
     }  # chatgpt参数
+
+    # chatgpt提示文本
     system_text = '''
             You are a localizer specialized in Simplified Chinese and Japanese culture, and you need to translate the Japanese text in the game into Simplified Chinese. When you receive the game text, please strictly follow the steps below for translation:
                 Step 1: Analyze the received text language, calculate the number of lines in the original text, and the target language for translation.
@@ -119,33 +123,37 @@ if __name__ == '__main__':
                 The output content format is as follows:
                 {"<text id>": "<translated text>"}
             '''
-    text_max = 1888  # 最大上传长度,不大于2000
-    post_max = 30  # 同时提交多少条
+    # 简单限制请求数与token长度
+    text_max = 1888  # 最大上传长度,
+    post_max = 50  # 每次提交多少条
+    post_time = 0  # 每post_max次后间隔时间,单位秒
     ##########################################
+    # 以下为不需要修改参数
+    loop = asyncio.get_event_loop()
+
     URL = f'{URL}/v1/chat/completions'
     heards = {
         'Authorization': f'Bearer {api_key}',
         "Content-Type": "application/json"
     }
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+
     translate_total = {}
     ex = {}
-    save_path = fr'{out_path}\translate'  # 保存文件路径
-    ex_ptah = fr'{out_path}\ex'  # 错误文件路径
+    save_path = fr'{out_path}\translate'  # 保存文件对应路径
+    ex_ptah = fr'{out_path}\ex'  # 错误文件对应路径
     if not os.path.exists(ex_ptah):
         os.makedirs(ex_ptah)
     if not os.path.exists(save_path):
         os.makedirs(save_path)
-
-    if os.path.exists(fr"{save_path}\1.json"):
-        file_path = fr"{save_path}\1.json"
+    if os.path.exists(fr"{ex_ptah}\1.json"):
+        file_path = fr"{ex_ptah}\{find_largest_numbered(ex_ptah)}.json"
     while True:
 
         with open(file_path, 'r', encoding='utf-8') as file:
             _tr = json.load(file)
         text_len = len(str(_tr))
         print(f"读取{file_path}", f"文件长度{text_len}")
+
         if text_len > 10000:
             pass
         elif text_len > 5000:
@@ -154,26 +162,26 @@ if __name__ == '__main__':
             text_max = 1
         else:
             break
-        run(
-            _tr,
-            fr"{save_path}\{find_largest_numbered(save_path) + 1}.json",
-            fr"{ex_ptah}\{find_largest_numbered(ex_ptah) + 1}.json"
+        loop.run_until_complete(
+            run(
+                _tr,
+                fr"{save_path}\{find_largest_numbered(save_path) + 1}.json",
+                fr"{ex_ptah}\{find_largest_numbered(ex_ptah) + 1}.json"
+            )
         )
         file_path = fr"{ex_ptah}\{find_largest_numbered(ex_ptah)}.json"
+
         translate_total = {}
         ex = {}
 
-    # 存储所有 JSON 数据的列表
+    # 合并文件夹中的所有 JSON 数据
     all_dict = {}
-    # 遍历目录下的所有文件
     for filename in os.listdir(save_path):
         if filename.endswith('.json'):
             _path = os.path.join(save_path, filename)
             with open(_path, 'r', encoding='utf-8') as file:
                 data = json.load(file)
                 all_dict.update(data)
-
-    # 合并所有 JSON 数据到一个文件中
     with open(fr"{out_path}\output.json", 'w+', encoding='utf-8') as output:
         json.dump(all_dict, output, indent=4, ensure_ascii=False)
     print(fr'合并完成，结果已保存到 {out_path}\output.json')
